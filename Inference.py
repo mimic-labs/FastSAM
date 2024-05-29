@@ -114,6 +114,94 @@ def main(args):
         better_quality=args.better_quality,
     )
 
+def calculate_area(mask):
+    return torch.sum(mask).item()
+
+def calculate_intersection_over_min_area(mask1, mask2):
+    intersection = torch.logical_and(mask1, mask2)
+    intersection_area = calculate_area(intersection)
+    mask1_area = calculate_area(mask1)
+    mask2_area = calculate_area(mask2)
+    min_area = min(mask1_area, mask2_area)
+    intersection_over_min_area = intersection_area / min_area
+    return intersection_over_min_area
+
+def remove_overlapping_masks(masks, threshold=0.8):
+    ignore_indices = set()
+
+    for i in range(len(masks)):
+        for j in range(i + 1, len(masks)):
+            intersection_over_min_area = calculate_intersection_over_min_area(masks[i], masks[j])
+            if intersection_over_min_area > threshold:
+                if torch.sum(masks[i]) < torch.sum(masks[j]):
+                    ignore_indices.add(i)
+                else:
+                    ignore_indices.add(j)
+
+    filtered_masks = torch.stack([mask for idx, mask in enumerate(masks) if idx not in ignore_indices])
+    return filtered_masks
+
+
+def segment(img_path, point_prompt="[[0,0]]", box_prompt="[[0,0,0,0]]", text_prompt=None, point_label="[0]", conf=0.4, iou=0.9, output="./output/", filter=True):
+    # load model
+    model = FastSAM("../FastSAM.pt")
+    point_prompt = ast.literal_eval(point_prompt)
+    box_prompt = convert_box_xywh_to_xyxy(ast.literal_eval(box_prompt))
+    point_label = ast.literal_eval(point_label)
+
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+
+    input = Image.open(img_path)
+    input = input.convert("RGB")
+    everything_results = model(
+        input,
+        device=device,
+        retina_masks=True,
+        imgsz=1024,
+        conf=conf,
+        iou=iou    
+        )
+    
+    bboxes = None
+    points = None
+    # point_label = None
+    prompt_process = FastSAMPrompt(input, everything_results, device=device)
+    if box_prompt[0][2] != 0 and box_prompt[0][3] != 0:
+            ann = prompt_process.box_prompt(bboxes=box_prompt)
+            bboxes = box_prompt
+    elif text_prompt != None:
+        ann = prompt_process.text_prompt(text=text_prompt)
+    elif point_prompt[0] != [0, 0]:
+        ann = prompt_process.point_prompt(
+            points=point_prompt, pointlabel=point_label
+        )
+        points = point_prompt
+        point_label = point_label
+    else:
+        ann = prompt_process.everything_prompt()
+
+    if filter:
+        filtered_ann = remove_overlapping_masks(ann)
+    else:
+        filtered_ann = ann
+
+    prompt_process.plot(
+        annotations=filtered_ann,
+        output_path=output+img_path.split("/")[-1],
+        bboxes = bboxes,
+        points = points,
+        point_label = point_label,
+        withContours=False,
+        better_quality=False,
+    )
+
+    return filtered_ann
 
 
 
